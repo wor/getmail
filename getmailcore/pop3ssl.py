@@ -4,73 +4,101 @@
 '''
 
 import socket
-from poplib import *
+from poplib import POP3, CR, LF, CRLF
 
 from exceptions import *
+from logging import logger
+log = logger()
 
 POP3_ssl_port = 995
 
-class pseudofile(object):
-    '''Implement something with semantics like a Python file() object on top
-    of something that supports at least read() and write().
-
-    Warning:  don't intermix calls to readline() and read().  You could get
-    data out of order.
+class sslsocket(object):
+    '''The Python poplib.POP3() class mixes socket-like .sendall() and
+    file-like .readline() for communications.  That would be okay, except that
+    the new socket.ssl objects provide only read() and write(), so they
+    don't act like a socket /or/ like a file.  Argh.
+    
+    This class takes a standard, connected socket.socket() object, sets it
+    to blocking mode (required for socket.ssl() to work correctly, though
+    apparently not documented), wraps .write() for .sendall() and implements
+    .readline().
+    
+    The modified POP3 class below can then use this to provide POP3-over-SSL.
+    
+    Thanks to Frank Benkstein for the inspiration.
     '''
-    def __init__(self, f, sizehint=512):
-        self.read = f.read
-        self.write = f.write
+    def __init__(self, sock, keyfile=None, certfile=None):
+        log.trace()
+        self.sock = sock
+        self.sock.setblocking(1)
+        if keyfile and certfile:
+            self.ssl = socket.ssl(self.sock, keyfile, certfile)
+        else:
+            self.ssl = socket.ssl(self.sock)
         self.buf = ''
-        self.bufsize = sizehint
+        self.bufsize = 128
 
-    def fillbuf(self):
+    def _fillbuf(self):
+        '''Fill an internal buffer for .readline() to use.
+        '''
+        log.trace()
         want = self.bufsize - len(self.buf)
-        if not want:
+        log.trace('want %i bytes\n' % want)
+        if want <= 0:
             return
-        got = self.read(want)
-        self.buf += got
+        s = self.ssl.read(want)
+        got = len(s)
+        log.trace('got %i bytes\n' % got)
+        self.buf += s
 
+    def close(self):
+        self.sock.close()
+        self.ssl = None
+
+    # self.sock.sendall    
+    def sendall(self, s):
+        # Maybe only set blocking around this call?
+        self.ssl.write(s)
+
+    # self.file.readline
     def readline(self):
+        '''Simple hack to implement .readline() on a non-file object that
+        only supports .read().
+        '''
+        log.trace()
         line = ''
         if not self.buf:
-            self.fillbuf()
-        if not self.buf:
-            return ''
-        while True:
-            i = self.buf.find('\n')
-            if i != -1:
-                line += self.buf[:i + 1]
-                self.buf = self.buf[i + 1:]
-                return line
-            if i == -1:
+            self._fillbuf()
+        log.trace('checking self.buf\n')
+        if self.buf:
+            log.trace('self.buf = "%r", len %i\n' % (self.buf, len(self.buf)))
+            while True:
+                log.trace('looking for EOL\n')
+                i = self.buf.find('\n')
+                if i != -1:
+                    log.trace('EOL found at %d\n' % i)
+                    line += self.buf[:i + 1]
+                    self.buf = self.buf[i + 1:]
+                    break
+                # else
+                log.trace('EOL not found, trying to fill self.buf\n')
                 line += self.buf
                 self.buf = ''
-                self.fillbuf()
+                self._fillbuf()
                 if not self.buf:
-                    return line
-
-class sslwrapper(object):
-    def __init__(self, sock, keyfile=None, certfile=None):
-        if keyfile and certfile:
-            self.ssl = socket.ssl(sock, keyfile, certfile)
-        else:
-            self.ssl = socket.ssl(sock)
-        self.write = self.ssl.write
-        self.read = self.ssl.read
-        self.recv = self.ssl.read
-        self.send = self.ssl.write
-
-    def sendall(self, s, flags=None):
-        tosend = len(s)
-        while tosend > 0:
-            i = self.send(s)
-            tosend -= i
-            s = s[i:]
+                    log.trace('nothing read, exiting\n')
+                    break
+                log.trace('end of loop\n')
+        log.trace('returning line "%r"\n' % line)
+        return line
 
 class POP3SSL(POP3):
     '''Thin subclass to add SSL functionality to the built-in POP3 class.
     Note that Python's socket module does not do certificate verification
     for SSL connections.
+    
+    This gets rid of the .file attribute from os.makefile(rawsock) and relies on 
+    sslsocket() above to provide .readline() instead.
     '''
     def __init__(self, host, port=POP3_ssl_port, keyfile=None, certfile=None):
         if not ((certfile and keyfile) or (keyfile == certfile == None)):
@@ -86,9 +114,9 @@ class POP3SSL(POP3):
                 self.rawsock = socket.socket(af, socktype, proto)
                 self.rawsock.connect(sa)
                 if certfile and keyfile:
-                    self.sock = sslwrapper(self.rawsock, keyfile, certfile)
+                    self.sock = sslsocket(self.rawsock, keyfile, certfile)
                 else:
-                    self.sock = sslwrapper(self.rawsock)
+                    self.sock = sslsocket(self.rawsock)
             except socket.error, msg:
                 if self.rawsock:
                     self.rawsock.close()
@@ -97,7 +125,32 @@ class POP3SSL(POP3):
             break
         if not self.sock:
             raise socket.error, msg
-        #self.file = self.sock.makefile('rb')
-        self.file = pseudofile(self.sock)
         self._debugging = 0
         self.welcome = self._getresp()
+
+    # Internal: return one line from the server, stripping CRLF.
+    # This is where all the CPU time of this module is consumed.
+    # Raise error_proto('-ERR EOF') if the connection is closed.
+    def _getline(self):
+        line = self.sock.readline()
+        if self._debugging > 1: print '*get*', `line`
+        if not line: raise error_proto('-ERR EOF')
+        octets = len(line)
+        # server can send any combination of CR & LF
+        # however, 'readline()' returns lines ending in LF
+        # so only possibilities are ...LF, ...CRLF, CR...LF
+        if line[-2:] == CRLF:
+            return line[:-2], octets
+        if line[0] == CR:
+            return line[1:-1], octets
+        return line[:-1], octets
+
+    def quit(self):
+        """Signoff: commit changes on server, unlock mailbox, close connection."""
+        try:
+            resp = self._shortcmd('QUIT')
+        except error_proto, val:
+            resp = val
+        self.sock.close()
+        del self.sock
+        return resp
