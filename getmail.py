@@ -1,721 +1,228 @@
-#!/usr/bin/python
-'''getmail.py - POP3 mail retriever with reliable Maildir and command delivery.
-Copyright (C) 2001 Charles Cazabon <getmail @ discworld.dyndns.org>
+#!/usr/bin/python2.3
 
-This program is free software; you can redistribute it and/or
-modify it under the terms of version 2 of the GNU General Public License
-as published by the Free Software Foundation.  A copy of this license should
-be included in the file COPYING.
-
-This program is distributed in the hope that it will be useful,
-but WITHOUT ANY WARRANTY; without even the implied warranty of
-MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-GNU General Public License for more details.
-
-You should have received a copy of the GNU General Public License
-along with this program; if not, write to the Free Software
-Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA  02111-1307, USA.
-
-'''
-
-__version__ = '3.2.5'
-__author__ = 'Charles Cazabon <getmail @ discworld.dyndns.org>'
-
-#
-# Imports
-#
-
-# Main Python library
 import sys
-import os
-import string
-import re
+import os.path
 import time
-import socket
-import traceback
-import stat
-from types import *
+import ConfigParser
+from optparse import OptionParser, OptionGroup
 
-# Other getmail bits
-from getmail_classes import *
-from getmail_utilities import *
-from getmail_constants import *
+from getmailcore import __version__, retrievers, destinations, filters, logging
+from getmailcore.exceptions import *
 
-#
-# Globals
-#
+log = logging.logger()
+log.addhandler(sys.stdout, logging.INFO, maxlevel=logging.INFO)
+log.addhandler(sys.stderr, logging.WARNING)
 
-# Count of deliveries for getmail; used in Maildir delivery
-deliverycount = 0
+defaults = {
+    'getmaildir' : '~/.getmail/',
+    'rcfile' : 'getmailrc',
 
-# Incompatible change in Python standard library in Python version 1.6;
-# session.retr() used to return the raw message lines, now it returns
-# the cooked (unstuffed) lines.  So we only unstuff for older versions of
-# Python now.
-if sys.hexversion < 0x01060000:
-    NEED_REMOVE_LEADING_DOTS = 1
-else:
-    NEED_REMOVE_LEADING_DOTS = 0
-
-#
-# Classes
-#
+    'verbose' : True,
+    'read_all' : True,
+    'delete' : False,
+}
 
 #######################################
-class getmail:
-    '''getmail.go() implements the main logic to retrieve mail from a
-    specified POP3 server and account, and deliver retrieved mail to the
-    appropriate Maildir(s) and/or commands.
-    '''
+def go(configs):
+    for (retriever, filters, destination, options) in configs:
+        now = int(time.time())
+        log.debug('initializing retriever %s\n' % retriever)
+        retriever.initialize()
+        for msgid in retriever:
+            retrieve = False
+            timestamp = retriever.oldmail.get(msgid, None)
+            if options['read_all'] or timestamp is None:
+                retrieve = True
+            size = retriever.getmsgsize(msgid)
+            if options['max_message_size'] and size > int(options['max_message_size']):
+                retrieve = False
 
-    ###################################
-    def __init__ (self, account, users):
-        self.conf = account.copy ()
-        confcopy = account.copy ()
-        if confcopy.has_key ('password'):
-            confcopy['password'] = '*'
-        self.logfunc (TRACE, 'account="%s", users="%s"\n' % (confcopy, users))
-        self.timestamp = int (time.time ())
-        for key in ('server', 'port', 'username', 'password'):
-            if not account.has_key (key):
-                raise getmailConfigException, 'account missing key (%s)' % key
+            try:    
+                log.info('Message %s (%d bytes) ... ' % (msgid, size))
+                if retrieve:
+                    msg = retriever.getmsg(msgid)
+                    log.info('from <%s> ... ' % msg.sender)
 
-        self.conf['shorthost'] = string.split (self.conf['server'], '.')[0]
-        try:
-            self.conf['ipaddr'] = socket.gethostbyname (self.conf['server'])
-        except socket.error, txt:
-            # Network unreachable, PPP down, etc
-            raise getmailNetworkError, 'network error (%s)' % txt
-
-        self.logfunc (INFO, 'getmail started for %s\n' % self)
-
-        for key in ('readall', 'delete'):
-            if not self.conf.has_key (key):
-                raise getmailConfigException, 'opts missing key (%s) for %s' % (key, self)
-
-        timeoutsocket.setDefaultSocketTimeout (self.conf['timeout'])
-
-        try:
-            # Get default delivery target (postmaster)
-            self.default_delivery = os.path.expanduser (self.conf['postmaster'])
-        except Exception, txt:
-            raise getmailConfigException, 'no default delivery for %s' % self
-
-        # Construct list of (re_obj, delivery_target) pairs
-        self.users = []
-        for (re_s, target) in users:
-            self.users.append ( {'re' : re.compile (re_s, re.IGNORECASE),
-                'target' : os.path.expanduser (target)} )
-            self.logfunc (TRACE, 'User #%i:  re="%s", target="%s"\n'
-                % (len (self.users), re_s, self.users[-1]['target']))
-
-        self.oldmail_filename = os.path.join (
-            os.path.expanduser (self.conf['getmaildir']),
-            string.replace ('oldmail-%(server)s-%(port)i-%(username)s' % self.conf,
-            '/', '-'))
-        self.read_oldmailfile ()
-
-        # Misc. info
-        self.info = {}
-        # Store local hostname plus short version
-        self.info['hostname'] = socket.gethostname ()
-        self.info['shorthost'] = string.split (self.info['hostname'], '.')[0]
-        #self.info['pid'] = os.getpid ()
-        self.info['msgcount'] = 0
-        self.info['localscount'] = 0
-
-        if self.conf['message_log']:
-            try:
-                filename = os.path.join (os.path.expanduser (self.conf['getmaildir']),
-                    os.path.expanduser (self.conf['message_log']))
-                self.logfile = open (filename, 'a')
-            except IOError, txt:
-                raise getmailConfigException, 'failed to open log file %s (%s)' % (filename, txt)
-        else:
-            self.logfile = None
-
-        self.msglog ('Started for %s' % self)
-
-    ###################################
-    def __str__ (self):
-        try:
-            return '%(username)s@%(server)s:%(port)i' % self.conf
-        except:
-            return 'getmail object %s' % id (self)
-
-    ###################################
-    def __del__ (self):
-        try:
-            self.logfunc (INFO, 'getmail finished for %s\n' % self)
-            if self.logfile and not self.logfile.closed:  self.logfile.close ()
-            timeoutsocket.setDefaultSocketTimeout (defs['timeout'])
-        except:
-            pass
-
-    ###################################
-    def logfunc (self, level, msg):
-        log (level, msg, self.conf)
-
-    ###################################
-    def msglog (self, msg):
-        if not self.conf['message_log']:
-            return
-        msg = res['percent'].sub ('%%', msg) % self.conf
-        ts = time.strftime ('%d %b %Y %H:%M:%S ', time.gmtime (time.time ()))
-        self.logfile.write (ts + msg + '\n')
-        self.logfile.flush ()
-
-    ###################################
-    def read_oldmailfile (self):
-        '''Read contents of oldmail file.'''
-        self.oldmail = {}
-        try:
-            for line in map (string.strip, open (self.oldmail_filename, 'r').readlines ()):
-                msgid, timestamp = string.split (line, '\0', 1)
-                self.oldmail[msgid] = int (timestamp)
-            self.logfunc (TRACE, 'read %i uids for %s\n' % (len (self.oldmail), self))
-        except IOError:
-            self.logfunc (TRACE, 'no oldmail file for %s\n' % self)
-
-    ###################################
-    def write_oldmailfile (self):
-        '''Write oldmail info to oldmail file.'''
-        try:
-            f = updatefile (self.oldmail_filename)
-            for msgid, timestamp in self.oldmail.items ():
-                if msgid in self.inbox:
-                    # This message still in inbox; remember it for next time.
-                    f.write ('%s\0%i\n' % (msgid, timestamp))
-                #else:
-                # Message doesn't exist in inbox, no sense remembering it.
-            f.close ()
-            self.logfunc (TRACE, 'wrote %i uids for %%(server)s:%%(username)s\n' % len (self.oldmail))
-        except IOError, txt:
-            self.logfunc (WARN, 'failed writing oldmail file for %%(server)s:%%(username)s (%s)\n' % txt)
-
-    ###################################
-    def connect (self):
-        '''Connect to POP3 server.'''
-        self.session = SPDS (self.conf['server'], self.conf['port'])
-        self.logfunc (TRACE, 'POP3 session initiated on port %(port)s for "%(username)s"\n')
-        self.logfunc (INFO, '  POP3 greeting:  %s\n' % self.session.welcome)
-
-    ###################################
-    def login (self):
-        '''Log in to the server with either APOP or USER/PASS directives.'''
-        if self.conf['use_apop']:
-            try:
-                rc = self.session.apop (self.conf['username'], self.conf['password'])
-                self.logfunc (INFO, '  POP3 APOP response:  %s\n' % rc)
-            except SPDS_error_proto:
-                raise getmailConfigException, 'error during attempted APOP authentication'
-        else:
-            rc = self.session.user (self.conf['username'])
-            self.logfunc (INFO, '  POP3 user response:  %s\n' % rc)
-            rc = self.session.pass_ (self.conf['password'])
-            self.logfunc (INFO, '  POP3 PASS response:  %s\n' % rc)
-
-    ###################################
-    def message_list (self):
-        '''Retrieve message list for this user.'''
-        response = self.session.list ()
-        rc, msglist_txt = response[0:2]
-        self.logfunc (INFO, '  POP3 list response:  %s\n' % rc)
-
-        msglist = []
-        for s in msglist_txt:
-            # Handle broken POP3 servers which return something after the length
-            msgnum, msginfo = string.split (s, None, 1)
-            try:
-                msgnum = int (msgnum)
-            except ValueError, txt:
-                self.logfunc (ERROR, '  Error:  POP3 server violates RFC1939 ("%s"), skipping line...\n' % s)
-                continue
-            # Keep track of length of message
-            try:
-                msglen = int (string.split (msginfo)[0])
-            except:
-                msglen = 0
-            msglist.append (list ((msgnum, msglen)))
-
-        try:
-            rc = self.session.uidl ()
-            self.logfunc (TRACE, 'UIDL response "%s"\n' % rc[0])
-            uidls = map (lambda x:  string.split (x, None, 1), rc[1])
-            if len (uidls) != len (msglist):
-                self.logfunc (ERROR, 'POP3 server returned %i UIDs for %i messages, will retrieve all messages'
-                    % (len (uidls), len (msglist)))
-                uidls = [(None, None)] * len (msglist)
-        except SPDS_error_proto, txt:
-            self.logfunc (WARN, 'POP3 server failed UIDL command, will retrieve all messages (%s)' % txt)
-            uidls = [(None, None)] * len (msglist)
-
-        for i in range (len (msglist)):
-            msglist[i].append (uidls[i][1])
-
-        msglist.append ( (None, None, None) )
-        self.msglist = msglist
-
-    ###################################
-    def report_mailbox_size (self):
-        '''Retrieve mailbox size for this user.'''
-        msgs, octets = self.session.stat ()
-        self.logfunc (INFO, '  POP3 stat response:  %i messages, %i octets\n'
-            % (msgs, octets))
-        self.msglog ('STAT: %i messages %i octets' % (msgs, octets))
-
-    ###################################
-    def process_msg (self, msg, msgnum, msgcount, msgsize):
-        '''Process retrieved message and deliver to appropriate recipients.'''
-        mess = getmailMessage (msg)
-        if self.conf['use_*env']:
-            env_sender, recipient = self.session.star_env (msgnum)
-            self.logfunc (TRACE, '*env envelope sender "%s", recipient "%s"\n' % (env_sender, recipient))
-        else:
-            try:
-                env_sender = address_no_brackets (mess.get_specific_header ('return-path', 1))
-            except getmailDataFormatException, txt:
-                self.logfunc (ERROR, 'message not in valid 822/2822 format, cannot determine envelope sender (%s)\n' % txt)
-                env_sender = ''
-            except getmailConfigException, txt:
-                self.logfunc (DEBUG, 'no Return-Path: header in message (%s)\n' % txt)
-                env_sender = ''
-            self.logfunc (TRACE, 'found envelope sender "%s"\n' % env_sender)
-
-            if self.conf['envelope_recipient']:
-                recipient = envelope_recipient (self.conf, mess)
-            else:
-                recipient = ''
-
-        # Export envelope sender address to environment
-        os.environ['SENDER'] = env_sender
-        # Export the envelope recipient address to the environment
-        os.environ['RECIPIENT'] = recipient
-
-        # Try to determine the address extension of the recipient address.
-        # Export it to the environment.
-        os.environ['EXT'] = ''
-        try:
-            local_part = recipient[:string.rindex (recipient, '@')]
-            parts = string.split (local_part, self.conf['extension_sep'], self.conf['extension_depth'])
-            if len (parts) == self.conf['extension_depth'] + 1:
-                os.environ['EXT'] = parts[-1]
-        except ValueError:
-            pass
-
-        msgid = mess.get ('message-id', 'None')
-        self.msglog ('New msg %i/%i len %s id "%s" from "%s"' % (msgnum, msgcount, msgsize, msgid, env_sender))
-
-        count = 0
-        if len (self.users):
-            count = self.do_deliveries (recipient, msg, msgid, env_sender)
-        #else:
-            # No local configurations, just send to postmaster
-
-        if not count:
-            # Made no deliveries of this message; send it to the default delivery
-            # target.
-            dt = self.deliver_msg (self.default_delivery,
-                self.message_add_info (msg,
-                    recipient or 'postmaster@%(hostname)s' % self.info),
-                 env_sender)
-            self.msglog ('Delivered to postmaster %s' % dt)
-
-        self.logfunc (TRACE, 'do_deliveries did %i deliveries\n' % count)
-
-        return count
-
-    #######################################
-    def do_deliveries (self, recipient, msg, msgid, env_sender):
-        '''Determine which configured local recipients to send a copy of this
-        message to, and dispatch to the deliver_msg() method.
-        '''
-        delivered = 0
-        self.logfunc (TRACE, 'msgid "%s"' % msgid)
-
-        # Test recipient address against the compiled regular expression
-        # objects for each configured user for this POP3 mailbox.  If the
-        # recipient address matches a given user's re, deliver at most one copy
-        # to the target associated with that re.
-        for user in self.users:
-            self.logfunc (TRACE, 'checking user re "%s"' % user['re'].pattern
-                + ', target "%s"\n' % user['target'])
-            if not user['re'].match (recipient):
+                    for mail_filter in filters:
+                        log.debug('passing to filter %s ... ' % mail_filter)
+                        msg = mail_filter.filter_message(msg)
+                        if msg is None:
+                            log.info('dropped by filter %s ... ' % mail_filter)
+                            break
+                    
+                    if msg is not None:
+                        r = destination.deliver_message(msg)
+                        log.info('delivered to %s ... ' % r)
+                    if options['delete']:
+                        retriever.delmsg(msgid)
+                        log.info('deleted')
+                else:
+                    log.info('not retrieving (timestamp %s)' % timestamp)
+            except getmailDeliveryError, o:
+                log.error('Delivery error (%s)\n' % o)
                 continue
 
-            self.logfunc (TRACE, 'user re matched recipient "%s"\n' % recipient)
-            # Deliver the message to this user
-            dt = self.deliver_msg (user['target'], self.message_add_info (msg, recipient), env_sender)
-            self.logfunc (TRACE, 'delivered to "%s"\n' % user['target'])
-            self.msglog ('Delivered to %s' % dt)
-            delivered = delivered + 1
+            if options['delete_after'] and timestamp and (now - timestamp)/86400 >= int(options['delete_after']):
+                retriever.delmsg(msgid)
+                log.info('deleted')
 
-        return delivered
+            log.info('\n')
 
-    #######################################
-    def deliver_msg (self, dest, msg, env_sender):
-        '''Determine the type of destination and dispatch to appropriate
-        delivery routine.  Currently understands Maildirs and commands.
-        The destination must exist; i.e. getmail will not create a maildir
-        if the specified destination does not exist.
-        '''
-        global deliverycount
-        # Handle command delivery first
-        if dest and dest[0] == '|':
-            dest = dest[1:]
-            return self.deliver_command (dest, msg, env_sender)
-
-        # Not as root
-        if os.name == 'posix' and (os.geteuid() == 0 or os.getegid() == 0):
-            raise getmailDeliveryException, 'refuse to deliver mail as root'
-
-        # If destination ends with '/', assume Maildir delivery
-        if dest and dest[-1] == '/':
-            deliverycount = deliverycount + 1
-            return deliver_maildir (dest, string.replace (msg, line_end['pop3'], line_end['maildir']), self.info['hostname'], deliverycount)
-
-        # Unknown destination type
-        raise getmailDeliveryException, 'destination "%s" is not a Maildir or command' % dest
-
-    ###################################
-    def message_add_info (self, message, recipient):
-        '''Add Delivered-To: and Received: info to headers of message.
-        '''
-        if self.conf['no_delivered_to']:
-            delivered_to = ''
-        else:
-            # Construct Delivered-To: header with address local_part@localhostname
-            delivered_to = 'Delivered-To: %s\n' % (recipient or 'unknown envelope recipient')
-
-        if self.conf['no_received']:
-            received = ''
-        else:
-            # Construct Received: header
-            info = 'from %(server)s (%(ipaddr)s)' % self.conf \
-                + ' by %(hostname)s' % self.info \
-                + ' with POP3 for <%s>; ' % recipient \
-                + timestamp ()
-            received = format_header ('Received', info)
-
-        return delivered_to + received + message
-
-    #######################################
-    def deliver_command (self, command, msg, env_sender):
-        'Deliver a mail message to a command.'
-        global deliverycount
-
-        try:
-            # At least some security...
-            if os.geteuid() == 0 or os.getegid() == 0:
-                raise getmailDeliveryException, 'refuse to deliver to commands as root'
-        except AttributeError:
-            # Windows -- modules os doesn't have geteuid().  Ignore on Windows.
-            pass
-
-        # Construct mboxrd-style 'From_' line
-        fromline = 'From %s %s\n' % (env_sender or '<>', time.asctime (time.gmtime (int (time.time ()))))
-
-        self.logfunc (TRACE, 'delivering to command "%s"\n' % command)
-
-        try:
-            import popen2
-
-            popen2._cleanup()
-            #cmd = popen2.Popen3 (command, 1, bufsize=-1)
-            cmd = popen2.Popen3 (command, 1, bufsize=512)
-            cmdout, cmdin, cmderr = cmd.fromchild, cmd.tochild, cmd.childerr
-            if self.conf['command_add_fromline']:
-                cmdin.write (fromline)
-            cmdin.write (string.replace (msg, line_end['pop3'], line_end['mbox']))
-            # Add trailing blank line
-            cmdin.write ('\n')
-            cmdin.flush ()
-            cmdin.close ()
-
-            r = cmd.wait ()
-            err = string.strip (cmderr.read ())
-            cmderr.close ()
-            out = string.strip (cmdout.read ())
-            cmdout.close ()
-
-            if r:
-                if os.WIFEXITED (r):
-                    exitcode = 'exited %i' % os.WEXITSTATUS (r)
-                    exitsignal = ''
-                elif os.WIFSIGNALED (r):
-                    exitcode = 'abnormal exit'
-                    exitsignal = 'signal %i' % os.WTERMSIG (r)
-                else:
-                    # Stopped, etc.
-                    exitcode = 'no exit?'
-                    exitsignal = ''
-                raise getmailDeliveryException, 'command "%s" %s %s (%s)' % (command, exitcode, exitsignal, err)
-
-            elif err:
-                raise getmailDeliveryException, 'command "%s" exited 0 but wrote to stderr (%s)' % (command, err)
-
-            if out:
-                # Command wrote something to stdout
-                self.logfunc (INFO, '  command "%s" said "%s"\n' % (command, out))
-
-        except ImportError:
-            raise getmailDeliveryException, 'popen2 module not found'
-
-        except StandardError, txt:
-            raise getmailDeliveryException, 'failure delivering message to command "%s" (%s)' % (command, txt)
-
-        # Delivery done
-        self.logfunc (TRACE, 'delivered to command "%s"\n' % command)
-
-        deliverycount = deliverycount + 1
-        return 'command "%s"' % command
-
-    ###################################
-    def abort (self, txt):
-        '''Some error has occurred after logging in to POP3 server.  Reset the
-        server and close the session cleanly if possible.'''
-
-        self.logfunc (WARN, 'Resetting connection and aborting (%s)\n' % txt)
-        self.msglog ('Aborted (%s)' % txt)
-        self.write_oldmailfile()
-        # Ignore exceptions with this session, as abort() is invoked after
-        # errors are already detected.
-        try:
-            self.session.rset ()
-        except:
-            pass
-        try:
-            self.session.quit ()
-        except:
-            pass
-
-    ###################################
-    def go (self):
-        '''Main method to retrieve mail from one POP3 account, process it,
-        and deliver it to appropriate local recipients.'''
-        self.inbox = []
-        try:
-            # Establish POP3 connection
-            self.connect ()
-            # Log in to server
-            self.login ()
-            # Let the user know what they're in for
-            self.report_mailbox_size ()
-            # Retrieve message list for this user.
-            self.message_list ()
-
-            for (msgnum, msglen, msgid) in self.msglist:
-                if msgnum == msglen == msgid == None:
-                    # No more messages; POP3.list() returns a final int
-                    self.logfunc (INFO, '  finished retrieving messages\n')
-                    break
-
-                # Append msgid to list of current inbox contents
-                self.inbox.append (msgid)
-
-                if self.conf['max_messages_per_session']:
-                    if self.info['msgcount'] == self.conf['max_messages_per_session']:
-                        self.logfunc (INFO, '  retrieved %(max_messages_per_session)i messages, quitting.\n')
-                        continue
-                    elif self.info['msgcount'] > self.conf['max_messages_per_session']:
-                        continue
-
-                self.logfunc (INFO, '  msg #%i/%i : len %s ... ' % (msgnum, len (self.msglist) - 1, msglen))
-
-                if msglen and self.conf['max_message_size'] and msglen > self.conf['max_message_size']:
-                    self.logfunc (WARN, 'over max message size of %(max_message_size)i, skipping ...\n')
-                    continue
-
-                # Retrieve this message if:
-                #   "get all mail" option is set, OR
-                #   server does not support UIDL (msgid is None), OR
-                #   this is a new message (not in oldmail)
-                if self.conf['readall'] or msgid is None or not self.oldmail.has_key (msgid):
-                    rc, msglines, octets = self.session.retr (msgnum)
-                    msg = string.join (msglines + [''], line_end['pop3'])
-                    self.logfunc (INFO, 'retrieved')
-                    if NEED_REMOVE_LEADING_DOTS:
-                        msg = pop3_unescape (msg)
-
-                    try:
-                        # Find recipients for this message and deliver to them.
-                        count = self.process_msg (msg, msgnum, len (self.msglist) - 1, msglen)
-                        if count == -1:
-                            pass
-                        elif count == 0:
-                            self.logfunc (INFO, ' ... delivered to postmaster')
-                            self.info['localscount'] = self.info['localscount'] + 1
-                        elif count == 1:
-                            self.logfunc (INFO, ' ... delivered 1 copy')
-                            self.info['localscount'] = self.info['localscount'] + count
-                        else:
-                            self.logfunc (INFO, ' ... delivered %i copies' % count)
-                            self.info['localscount'] = self.info['localscount'] + count
-
-                    except getmailDeliveryException, txt:
-                        self.logfunc (ERROR, ' ... failed delivering message (%s), skipping\n' % txt)
-                        # Don't remember this message as "read" on error
-                        del self.inbox[-1]
-                        # Skip to next message, don't abort
-                        continue
-
-                    self.info['msgcount'] = self.info['msgcount'] + 1
-
-                else:
-                    self.logfunc (INFO, 'previously retrieved ...')
-
-                # Delete this message if the "delete" or "delete_after" options
-                # are set
-                if self.conf['delete']:
-                    rc = self.session.dele (msgnum)
-                    self.logfunc (INFO, ', deleted')
-                    # Remove msgid from list of current inbox contents
-                    if msgid is not None:  del self.inbox[-1]
-                if self.conf['delete_after']:
-                    if self.oldmail.get (msgid, None):
-                        self.logfunc (TRACE, time.strftime (' originally seen %Y-%m-%d %H:%M:%S', time.localtime (self.oldmail[msgid])))
-                    else:
-                        self.logfunc (TRACE, ' not previously seen')
-                    if self.oldmail.has_key (msgid) and self.oldmail[msgid] < (self.timestamp - self.conf['delete_after'] * 86400):
-                        rc = self.session.dele (msgnum)
-                        self.logfunc (INFO, ' ... older than %(delete_after)i days, deleted')
-                        # Remove msgid from list of current inbox contents
-                        if msgid is not None:  del self.inbox[-1]
-
-                if msgid is not None and not self.oldmail.get (msgid, None):
-                    self.oldmail[msgid] = self.timestamp
-                # Finished delivering this message
-                self.logfunc (INFO, '\n')
-
-            # Done processing messages; process oldmail contents
-            self.write_oldmailfile()
-
-            # Close session and display summary
-            self.session.quit ()
-            self.logfunc (INFO, 'POP3 session completed for "%(username)s"\n')
-            self.logfunc (INFO, 'Retrieved %(msgcount)i messages for %(localscount)i local recipients\n\n' % self.info)
-            self.msglog ('Finished %s' % self)
-
-        except SystemExit:
-            raise
-
-        except MemoryError:
-            self.logfunc (ERROR, '  Memory exhausted (%s)\n' % self)
-            self.abort ('Out of memory')
-
-        except Timeout, txt:
-            txt = 'TCP timeout'
-            self.logfunc (ERROR, '  %s (%s)\n' % (txt, self))
-            self.abort (txt)
-
-        except SPDS_error_proto, txt:
-            txt = 'POP3 protocol error (%s) (%s)' % (txt, self)
-            self.logfunc (ERROR, '  %s\n' % txt)
-            self.abort (txt)
-
-        except socket.error, txt:
-            txt = 'Socket error (%s) (%s)' % (txt, self)
-            self.logfunc (ERROR, '  %s\n' % txt)
-            self.abort (txt)
-
-        except getmailConfigException, txt:
-            txt = 'Configuration error (%s) (%s)' % (txt, self)
-            self.logfunc (ERROR, '  %s\n' % txt)
-            self.abort (txt)
-
-        except getmailNetworkError, txt:
-            txt = 'Network error (%s) (%s)' % (txt, self)
-            self.logfunc (ERROR, '  %s\n' % txt)
-            self.abort (txt)
-
-        except KeyboardInterrupt:
-            txt = 'User aborted'
-            self.logfunc (WARN, '  %s (%s)\n' % (txt, self))
-            self.abort (txt)
-            raise SystemExit
-
-        except getmailUnhandledException, txt:
-            txt = 'Unknown error (%s) (%s)' % (txt, self)
-            self.logfunc (FATAL, '  %s\n' % txt)
-            self.msglog (txt)
-            raise getmailUnhandledException, txt
-
-#
-# Main script code
-#
 
 #######################################
-def main ():
-    '''Main entry point for getmail.
-    '''
-    config = defs.copy ()
-    cmdline_opts = parse_options (sys.argv[1:], __version__)
-    config.update (cmdline_opts)
-
-    if config['help']:
-        help (exitcodes['OK'])
-
-    filename = os.path.join (os.path.expanduser (config['getmaildir']),
-        os.path.expanduser (config['rcfilename']))
-
+def main():
+    log.info('getmail version %s\n' % __version__)
+    log.info('Copyright (C) 1998-2004 Charles Cazabon.  Licensed under the GNU GPL version 2.\n')
     try:
-        config, mail_configs = read_configfile (filename, config)
-        # Need to re-apply commandline overrides here
-        config.update (cmdline_opts)
+        parser = OptionParser(version='%%prog %s' % __version__)
+        parser.add_option('-g', '--getmaildir',
+            dest='getmaildir', action='store', default=defaults['getmaildir'],
+            help='look in DIR for config/data files', metavar='DIR')
+        parser.add_option('-r', '--rcfile',
+            dest='rcfile', action='append', default=[],
+            help='load configuration from FILE (may be given multiple times)', metavar='FILE')
+        parser.add_option('--dump', 
+            dest='dump_config', action='store_true', default=False,
+            help='dump configuration and exit (debugging)')
+        parser.add_option('--trace', 
+            dest='trace', action='store_true', default=False,
+            help='print extended debugging information')
+        overrides = OptionGroup(parser, 'Overrides',
+            'The following options override those specified in any getmailrc file.'
+        )
+        overrides.add_option('-v', '--verbose',
+            dest='override_verbose', action='store_true',
+            help='print informational messages')
+        overrides.add_option('-q', '--quiet',
+            dest='override_verbose', action='store_false',
+            help='do not print informational messages')
+        overrides.add_option('-d', '--delete',
+            dest='override_delete', action='store_true',
+            help='delete messages from server after retrieving')
+        overrides.add_option('-l', '--dont-delete',
+            dest='override_delete', action='store_false',
+            help='do not delete messages from server after retrieving')
+        overrides.add_option('-a', '--all',
+            dest='override_read_all', action='store_true',
+            help='retrieve all messages')
+        overrides.add_option('-n', '--new',
+            dest='override_read_all', action='store_false',
+            help='retrieve only unread messages')
+        parser.add_option_group(overrides)
 
-        for (account, _locals) in mail_configs:
-            # Apply commandline overrides to options
-            account.update (cmdline_opts)
+        (options, args) = parser.parse_args(sys.argv[1:])
+        if args:
+            raise getmailOperationError('unknown argument(s) %s ; try --help' % args)
+        if not options.rcfile:
+            options.rcfile.append(defaults['rcfile'])
 
-        if not mail_configs:
-            log (FATAL, '\nError:  no POP3 account configurations found in getmailrc file (%s)\n' % filename, config)
-            help ()
+        configs = []
+        for filename in options.rcfile:
+            path = os.path.join(os.path.expanduser(options.getmaildir), filename)
+            log.debug('processing rcfile %s\n' % path)
+            if not os.path.exists(path):
+                raise getmailOperationError('configuration file %s does not exist' % path)
+            elif not os.path.isfile(path):
+                raise getmailOperationError('%s is not a file' % path)
+            f = file(path, 'rb')
+            config = {
+                'read_all' : defaults['read_all'],
+                'delete' : defaults['delete'],
+                'verbose' : defaults['verbose'],
+                'max_message_size' : None,
+                'delete_after' : None,
+            }
+            configparser = ConfigParser.RawConfigParser(config)
+            configparser.readfp(f, path)
 
-        # Everything is go.
-        if config['log_level'] < WARN:
-            blurb ()
-            version (__version__)
-
-        if config['dump']:
-            dump_config (config, mail_configs)
-            sys.exit (exitcodes['OK'])
-
-        for (account, _locals) in mail_configs:
             try:
-                getmail (account, _locals).go ()
-            except getmailNetworkError, txt:
-                log (WARN, '%s\n' % txt, config)
+                if configparser.has_option('options', 'verbose'):
+                    config['verbose'] = bool(eval(configparser.get('options', 'verbose')))
 
-    except SystemExit:
-        raise
+                retriever_type = configparser.get('retriever', 'type')
+                retriever_func = getattr(retrievers, retriever_type)
+                if not callable(retriever_func):
+                    raise getmailConfigurationError('configuration file %s specifies incorrect retriever type (%s)' % (path, retriever_type))
+                retriever_args = {'getmaildir' : options.getmaildir}
+                for (name, value) in configparser.items('retriever'):
+                    retriever_args[name] = value
+                log.debug('instantiating retriever %s with args %s\n' % (retriever_type, retriever_args))
+                retriever = retriever_func(**retriever_args)
+                log.debug('checking retriever configuration for %s\n' % retriever)
+                retriever.checkconf()
 
-    except getmailConfigException, txt:
-        txt = 'Configuration error (%s)' % txt
-        log (FATAL, '  %s\n' % txt, config)
-        sys.exit (exitcodes['ERROR'])
+                destination_type = configparser.get('destination', 'type')
+                destination_func = getattr(destinations, destination_type)
+                if not callable(destination_func):
+                    raise getmailConfigurationError('configuration file %s specifies incorrect destination type (%s)' % (path, destination_type))
+                destination_args = {}
+                for (name, value) in configparser.items('destination'):
+                    destination_args[name] = value
+                log.debug('instantiating destination %s with args %s\n' % (destination_type, destination_args))
+                destination = destination_func(**destination_args)
 
-    except:
-        log (FATAL, '\ngetmail bug:  please include the following information in any bug report:\n\n', config)
-        log (FATAL, '  getmail version %s\n' % __version__, config)
-        log (FATAL, '  ConfParser version %s\n' % ConfParser.__version__, config)
-        log (FATAL, '  Python version %s\n\n' % sys.version, config)
-        log (FATAL, 'Unhandled exception follows:\n', config)
-        exc_type, value, tb = sys.exc_info ()
-        tblist = traceback.format_tb (tb, None) + traceback.format_exception_only (exc_type, value)
-        if type (tblist) != ListType:
-            tblist = [tblist]
-        for line in tblist:
-            log (FATAL, '  ' + string.rstrip (line) + '\n', config)
-        log (FATAL, '\n\Please also include configuration information from running getmail\n', config)
-        log (FATAL, 'with your normal options plus "--dump".\n', config)
-        sys.exit (exitcodes['ERROR'])
+                # Filters
+                filters = []
+                filtersections =  [section.lower() for section in configparser.sections() if section.lower.startswith('filter')]
+                filtersections.sort()
+                for section in filtersections:
+                    log.debug('processing filter section %s\n' % section)
+                    filter_type = configparser.get(section, 'type')
+                    filter_func = getattr(filters, filter_type)
+                    if not callable(filter_func):
+                        raise getmailConfigurationError('configuration file %s specifies incorrect filter type (%s)' % (path, filter_type))
+                    filter_args = {}
+                    for (name, value) in configparser.items(section):
+                        filter_args[name] = value
+                    log.debug('instantiating filter %s with args %s\n' % (filter_type, filter_args))
+                    mail_filter = filter_func(**filter_args)
+                    filters.append(mail_filter)
 
-    sys.exit (exitcodes['OK'])
+            except ConfigParser.NoSectionError, o:
+                raise getmailConfigurationError('configuration file %s missing section (%s)' % (path, o))
+            except ConfigParser.NoOptionError, o:
+                raise getmailConfigurationError('configuration file %s missing option (%s)' % (path, o))
+            except (AttributeError, ConfigParser.DuplicateSectionError, ConfigParser.InterpolationError, ConfigParser.MissingSectionHeaderError, ConfigParser.ParsingError), o:
+                raise getmailConfigurationError('configuration file %s incorrect (%s)' % (path, o))
+
+            # Apply overrides from commandline
+            for option in ('read_all', 'delete', 'verbose'):
+                val = getattr(options, 'override_%s' % option)
+                if val is not None:
+                    log.debug('overriding option %s from commandline %s\n' % (option, val))
+                    config[option] = val
+
+            if options.trace:
+                log.clearhandlers()
+
+            if not config['verbose']:
+                log.clearhandlers()
+                log.addhandler(sys.stderr, logging.WARNING)
+            
+            if options.dump_config:
+                log.info('getmail configuration:\n')
+                log.info('  retriever:  ')
+                retriever.showconf()
+                log.info('  destination:  ')
+                destination.showconf()
+                log.info('  options:\n')
+                names = config.keys()
+                names.sort()
+                for name in names:
+                    log.info('    %s : %s\n' % (name, config[name]))
+                log.info('\n')
+            else:
+                configs.append( (retriever, filters, destination, config) )
+
+        go(configs)
+
+    except getmailConfigurationError, o:
+        log.error('Configuration error: %s\n' % o)
+        sys.exit(2)
+    except getmailOperationError, o:
+        log.error('Error: %s\n' % o)
+        sys.exit(3)
 
 #######################################
-if sys.hexversion < 0x010502f0:
-    blurb ()
-    version (__version__)
-    sys.exit ('This program requires Python version 1.5.2 or later')
 if __name__ == '__main__':
-    main ()
+    main()
