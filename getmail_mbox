@@ -36,14 +36,16 @@ for arg in sys.argv[1:]:
     elif not path:
         path = arg
     else:
-        raise SystemExit('Error: mbox path specified twice (was %s, now %s)' % (path, arg))
+        raise SystemExit('Error: mbox path specified twice (was %s, now %s)'
+            % (path, arg))
 
 logger = logging.logger()
 logger.addhandler(sys.stderr, constants.WARNING)
 if verbose:
     logger.addhandler(sys.stdout, constants.INFO, constants.INFO)
 
-if not (path and (path.startswith('.') or path.startswith('/')) and not path.endswith('/')):
+if not (path and (path.startswith('.') or path.startswith('/'))
+        and not path.endswith('/')):
     raise SystemExit('Error: mbox must start with . or / and not end with /')
 
 if os.path.exists(path) and not os.path.isfile(path):
@@ -59,9 +61,11 @@ try:
     dest = destinations.Mboxrd(path=path)
     d = dest.deliver_message(msg, True, False)
 except getmailDeliveryError, o:
-    raise SystemExit('Error: delivery error delivering to mboxrd %s (%s)' % (path, o))
+    raise SystemExit('Error: delivery error delivering to mboxrd %s (%s)'
+        % (path, o))
 except StandardError, o:
-    raise SystemExit('Error: other error delivering to mboxrd %s (%s)' % (path, o))
+    raise SystemExit('Error: other error delivering to mboxrd %s (%s)'
+        % (path, o))
 
 if verbose:
     sys.stdout.write('Delivered to mboxrd %s\n' % path)

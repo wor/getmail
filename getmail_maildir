@@ -39,9 +39,11 @@ for arg in sys.argv[1:]:
     elif not path:
         path = arg
     else:
-        raise SystemExit('Error: maildir path specified twice (was %s, now %s)' % (path, arg))
+        raise SystemExit('Error: maildir path specified twice (was %s, now %s)'
+            % (path, arg))
 
-if not (path and (path.startswith('.') or path.startswith('/')) and path.endswith('/')):
+if not (path and (path.startswith('.') or path.startswith('/'))
+        and path.endswith('/')):
     raise SystemExit('Error: maildir must start with . or / and end with /')
 
 if not is_maildir(path):
@@ -56,9 +58,11 @@ if os.environ.has_key('RECIPIENT'):
 try:
     d = deliver_maildir(path, msg.flatten(True, False), hostname)
 except getmailDeliveryError, o:
-    raise SystemExit('Error: delivery error delivering to maildir %s (%s)' % (path, o))
+    raise SystemExit('Error: delivery error delivering to maildir %s (%s)'
+        % (path, o))
 except StandardError, o:
-    raise SystemExit('Error: other error delivering to maildir %s (%s)' % (path, o))
+    raise SystemExit('Error: other error delivering to maildir %s (%s)'
+        % (path, o))
 
 if verbose:
     sys.stdout.write('Delivered to maildir %s\n' % path)
