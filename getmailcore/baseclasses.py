@@ -6,20 +6,235 @@
 __all__ = [
     'ConfigurableBase',
     'ForkingBase',
+    'ConfInstance',
+    'ConfString',
+    'ConfBool',
+    'ConfInt',
+    'ConfTupleOfStrings',
+    'ConfTupleOfTupleOfStrings',
+    'ConfPassword',
+    'ConfDirectory',
+    'ConfFile',
+    'ConfMaildirPath',
+    'ConfMboxPath',
 ]
 
+import sys
 import os
 import time
 import signal
+import types
 import sets
 
 from getmailcore.exceptions import *
-from getmailcore.logging import logger
-from getmailcore.utilities import eval_bool
+import getmailcore.logging
+from getmailcore.utilities import eval_bool, expand_user_vars, lock_file, \
+    unlock_file
 
 #
 # Base classes
 #
+
+
+class ConfItem:
+    securevalue = False
+    def __init__(self, name, dtype, default=None, required=True):
+        self.log = getmailcore.logging.Logger()
+        self.name = name
+        self.dtype = dtype
+        self.default = default
+        self.required = required
+
+    def __getitem__(self, key):
+        # Backward-compatibility hack to enable ConfigurableBase.checkconf()
+        # to access the name attribute like the old-style dictionaries.
+        # :TODO: cc - remove when all configuration items converted to classes
+        if key == 'name':
+            return self.name
+        raise KeyError(key)
+
+    def validate(self, configuration, val=None):
+        if val is None:
+            # If not passed in by subclass
+            val = configuration.get(self.name, None)
+        if val is None:
+            # Not provided.
+            if self.required:
+                raise getmailConfigurationError(
+                    '%s: missing required configuration parameter' % self.name
+                )
+            # Use default.
+            return self.default
+        if type(val) is not self.dtype and val != self.default:
+            # Got value, but not of expected type.  Try to convert.
+            if self.securevalue:
+                self.log.debug('converting %s to type %s\n'
+                    % (self.name, self.dtype))
+            else:
+                self.log.debug('converting %s (%s) to type %s\n'
+                    % (self.name, val, self.dtype))
+            
+            try:
+                if self.dtype == bool:
+                    val = eval_bool(val)
+                else:
+                    val = self.dtype(eval(val))
+            except (ValueError, SyntaxError, TypeError), o:
+                raise getmailConfigurationError(
+                    '%s: configuration value (%s) not of required type %s (%s)'
+                    % (self.name, val, self.dtype, o)
+                )
+        return val
+
+class ConfInstance(ConfItem):
+    def __init__(self, name, default=None, required=None):
+        ConfItem.__init__(self, name, types.InstanceType, default=default, 
+                          required=required)
+
+class ConfString(ConfItem):
+    def __init__(self, name, default=None, required=None):
+        ConfItem.__init__(self, name, str, default=default, required=required)
+
+class ConfBool(ConfItem):
+    def __init__(self, name, default=None, required=None):
+        ConfItem.__init__(self, name, bool, default=default, required=required)
+
+class ConfInt(ConfItem):
+    def __init__(self, name, default=None, required=None):
+        ConfItem.__init__(self, name, int, default=default, required=required)
+
+class ConfTupleOfStrings(ConfString):
+    def __init__(self, name, default=None, required=None):
+        ConfString.__init__(self, name, default=default, required=required)
+    
+    def validate(self, configuration):
+        val = ConfItem.validate(self, configuration)
+        try:
+            if val is None or val is '':
+                val = '()'
+            tup = eval(val)
+            if type(tup) != tuple:
+                raise ValueError('not a tuple')
+            val = tup
+        except (ValueError, SyntaxError), o:
+            raise getmailConfigurationError(
+                '%s: incorrect format (%s)' % (self.name, o)
+            )
+        result = [str(item) for item in val]
+        return tuple(result)
+
+class ConfTupleOfTupleOfStrings(ConfString):
+    def __init__(self, name, default=None, required=None):
+        ConfString.__init__(self, name, default=default, required=required)
+    
+    def validate(self, configuration):
+        val = ConfItem.validate(self, configuration)
+        try:
+            if val is None or val is '':
+                val = '()'
+            tup = eval(val)
+            if type(tup) != tuple:
+                raise ValueError('not a tuple')
+            val = tup
+        except (ValueError, SyntaxError), o:
+            raise getmailConfigurationError(
+                '%s: incorrect format (%s)' % (self.name, o)
+            )
+        for tup in val:
+            if type(tup) != tuple:
+                raise ValueError('contained value "%s" not a tuple' % tup)
+            if len(tup) != 2:
+                raise ValueError('contained value "%s" not length 2' % tup)
+            for part in tup:
+                if type(part) != str:
+                    raise ValueError('contained value "%s" has non-string part '
+                                     '"%s"' % (tup, part))
+
+        return val
+
+class ConfPassword(ConfString):
+    securevalue = True
+
+class ConfDirectory(ConfString):
+    def __init__(self, name, default=None, required=None):
+        ConfString.__init__(self, name, default=default, required=required)
+    
+    def validate(self, configuration):
+        val = ConfString.validate(self, configuration)
+        if val is None:
+            return None
+        val = expand_user_vars(val)
+        if not os.path.isdir(val):
+            raise getmailConfigurationError(
+                '%s: specified directory "%s" does not exist'
+                % (self.name, val)
+            )
+        return val
+
+class ConfFile(ConfString):
+    def __init__(self, name, default=None, required=None):
+        ConfString.__init__(self, name, default=default, required=required)
+    
+    def validate(self, configuration):
+        val = ConfString.validate(self, configuration)
+        if val is None:
+            return None
+        val = expand_user_vars(val)
+        if not os.path.isfile(val):
+            raise getmailConfigurationError(
+                '%s: specified file "%s" does not exist'
+                % (self.name, val)
+            )
+        return val
+
+class ConfMaildirPath(ConfDirectory):
+    def validate(self, configuration):
+        val = ConfDirectory.validate(self, configuration)
+        if val is None:
+            return None
+        if not val.endswith('/'):
+            raise getmailConfigurationError(
+                '%s: maildir must end with "/"'
+                % self.name
+            )
+        for subdir in ('cur', 'new', 'tmp'):
+            subdirpath = os.path.join(val, subdir)
+            if not os.path.isdir(subdirpath):
+                raise getmailConfigurationError(
+                    '%s: maildir subdirectory "%s" does not exist'
+                    % (self.name, subdirpath)
+                )
+        return val
+
+class ConfMboxPath(ConfString):
+    def __init__(self, name, default=None, required=None):
+        ConfString.__init__(self, name, default=default, required=required)
+    
+    def validate(self, configuration):
+        val = ConfString.validate(self, configuration)
+        if val is None:
+            return None
+        val = expand_user_vars(val)
+        if not os.path.isfile(val):
+            raise getmailConfigurationError(
+                '%s: specified mbox file "%s" does not exist'
+                % (self.name, val)
+            )
+        fd = os.open(val, os.O_RDWR)
+        f = os.fdopen(fd, 'r+b')
+        lock_file(f)
+        # Check if it _is_ an mbox file.  mbox files must start with "From "
+        # in their first line, or are 0-length files.
+        f.seek(0, 0)
+        first_line = f.readline()
+        unlock_file(f)
+        if first_line and first_line[:5] != 'From ':
+            # Not an mbox file; abort here
+            raise getmailConfigurationError(
+                '%s: not an mboxrd file' % val
+            )
+        return val
+
 
 #######################################
 class ConfigurableBase(object):
@@ -38,7 +253,7 @@ class ConfigurableBase(object):
     '''
 
     def __init__(self, **args):
-        self.log = logger()
+        self.log = getmailcore.logging.Logger()
         self.log.trace()
         self.conf = {}
         for (name, value) in args.items():
@@ -56,37 +271,44 @@ class ConfigurableBase(object):
         if self.__confchecked:
             return
         for item in self._confitems:
-            self.log.trace('checking %s\n' % item)
-            name = item['name']
-            dtype = item['type']
-            if not name in self.conf:
-                # Not provided
-                if 'default' in item:
-                    self.conf[name] = item['default']
-                else:
-                    raise getmailConfigurationError('missing required'
-                        ' configuration parameter %s' % name)
-            elif type(self.conf[name]) is not dtype:
-                # Value supplied, but not of expected type.  Try to convert.
-                try:
-                    val = self.conf[name]
-                    if name.lower() == 'password':
-                        self.log.debug('converting password to type %s\n'
-                            % dtype)
+            if type(item) == dict:
+                # Legacy configuration item
+                self.log.trace('checking %s\n' % item)
+                name = item['name']
+                dtype = item['type']
+                if not name in self.conf:
+                    # Not provided
+                    if 'default' in item:
+                        self.conf[name] = item['default']
                     else:
-                        self.log.debug('converting %s (%s) to type %s\n'
-                            % (name, val, dtype))
-                    if dtype == bool:
-                        self.conf[name] = eval_bool(val)
-                    else:
-                        self.conf[name] = dtype(eval(val))
-                except (ValueError, SyntaxError, TypeError), o:
-                    raise getmailConfigurationError('configuration value'
-                        ' %s (%s) not of required type %s (%s)'
-                        % (name, val, dtype, o))
+                        raise getmailConfigurationError('missing required'
+                            ' configuration parameter %s' % name)
+                elif type(self.conf[name]) is not dtype:
+                    # Value supplied, but not of expected type.  Try to convert.
+                    try:
+                        val = self.conf[name]
+                        if name.lower() == 'password':
+                            self.log.debug('converting password to type %s\n'
+                                % dtype)
+                        else:
+                            self.log.debug('converting %s (%s) to type %s\n'
+                                % (name, val, dtype))
+                        if dtype == bool:
+                            self.conf[name] = eval_bool(val)
+                        else:
+                            self.conf[name] = dtype(eval(val))
+                    except (ValueError, SyntaxError, TypeError), o:
+                        raise getmailConfigurationError('configuration value'
+                            ' %s (%s) not of required type %s (%s)'
+                            % (name, val, dtype, o))
+            else:
+                # New class-based configuration item
+                self.log.trace('checking %s\n' % item.name)
+                self.conf[item.name] = item.validate(self.conf)
+
         unknown_params = sets.ImmutableSet(self.conf.keys()).difference(
             sets.ImmutableSet([item['name'] for item in self._confitems]))
-        for param in unknown_params:
+        for param in sorted(list(unknown_params), key=str.lower):
             self.log.warning('Warning: ignoring unknown parameter "%s" '
                 '(value: %s)\n' % (param, self.conf[param]))
         self.__confchecked = True
@@ -114,7 +336,7 @@ class ForkingBase(object):
 
     Sub-classes must provide the following data attributes and methods:
 
-        log - an object of type getmailcore.logger()
+        log - an object of type getmailcore.logging.Logger()
 
     '''
     def _child_handler(self, sig, stackframe):
@@ -162,3 +384,12 @@ class ForkingBase(object):
         exitcode = os.WEXITSTATUS(self.__child_status)
 
         return exitcode
+
+
+# For Python 2.3, which lacks the sorted() builtin
+if sys.hexversion < 0x02040000:
+    def sorted(l, key=lambda x: x):
+        lst = [(key(item), item) for item in l]
+        lst.sort()
+        return [val for (unused, val) in lst]
+    __all__.append('sorted')
