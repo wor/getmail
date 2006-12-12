@@ -10,16 +10,35 @@ Regarding packages/ports/emerges/etc
 ------------------------------------
 
 CRITICAL:  if you are using a "package"/"emerge"/"port" of getmail, DO NOT
-REPORT PROBLEMS TO ME.  Report them to your OS vendor or packager -- only
-they can help you with problems introduced by their packaging of getmail,
-and only they (and I) can reliably determine whether a problem is in
-getmail, or in their packaging (it's usually the latter).  So report problems
-to whoever created the package/port you're using, and if the packager is sure
-it's a problem in getmail, they can report it to me.
+REPORT PROBLEMS TO ME if that package makes changes to the original getmail
+code; if the package includes patches or other changes to the getmail code,
+report the problem to your OS vendor or packager -- only they can help you with
+problems introduced by their packaging of getmail.
 
-If you want to report a getmail problem to me, please ensure that you have
-installed from the tarball or noarch RPM file which I provide.  Then follow
-the rest of the instructions below.
+If you're not sure whether the package you're using is an unmodified version of
+getmail, I can help you determine that.  Make sure to include a URL to the
+package you installed in your email.
+
+To packagers: feel free to contact me regarding your packaging of getmail, and
+any issues you might have with getmail as I distribute it.  If you think
+changes to getmail are necessary for your package, let's discuss it -- maybe
+the changes you want would be good for all getmail users, and I can integrate
+them into the trunk.  If you *do* distribute a modified version of getmail,
+please make a good-faith effort at ensuring that anyone using your package
+knows that the version you distribute differs from mine, and the reasons for
+the changes.
+
+Before reporting a problem
+--------------------------
+
+If you want to report a getmail problem to me, please ensure
+
+  -you are running the latest version of getmail from the
+  website at http://pyropus.ca/software/getmail/
+
+  -you have installed getmail from the .tar.gz file I provide
+
+Then follow the rest of the instructions below.
 
 How to report a problem with getmail
 ------------------------------------
@@ -30,10 +49,6 @@ IMPORTANT:  Please include the output of
 
 and a copy of your getmail rc file(s) (with password masked) with any bug 
 report.
-
-IMPORTANT:  Ensure you have upgraded to the latest version of getmail (from the 
-website at http://pyropus.ca/software/getmail/) before reporting a 
-bug.  Most bugs are fixed after the first report.
 
 If you find a bug in getmail, please either join the getmail users' mailing
 list and report it there (preferred), or send it to me at 
