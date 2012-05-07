@@ -22,8 +22,22 @@ password = mailpassword
 type = Maildir
 path = ~jeffp/Maildir/
 
+# Example 2:  same as (1), but evaluate password using external command. In this
+# case gpg.
 #
-# Example 2:  same as (1), but operate quietly, delete messages from
+
+[retriever]
+type = SimplePOP3Retriever
+server = pop.example.net
+username = jeff.plotzky
+passwordeval = gpg -d ~/.pop.example.net.gpg
+
+[destination]
+type = Maildir
+path = ~jeffp/Maildir/
+
+#
+# Example 3:  same as (1), but operate quietly, delete messages from
 # the server after retrieving them, and log getmail's actions (in detail)
 # to a file.
 #
@@ -45,7 +59,7 @@ type = Maildir
 path = ~jeffp/Maildir/
 
 #
-# Example 3: same as (1), but the mail account is accessed via IMAP4 instead
+# Example 4: same as (1), but the mail account is accessed via IMAP4 instead
 # of POP3.
 #
 
@@ -60,7 +74,7 @@ type = Maildir
 path = ~jeffp/Maildir/
 
 #
-# Example 4: same as (3), but retrieve mail from the INBOX, INBOX.spam, and
+# Example 5: same as (4), but retrieve mail from the INBOX, INBOX.spam, and
 # mailing-lists.getmail-users mail folders.
 #
 
@@ -76,7 +90,7 @@ type = Maildir
 path = ~jeffp/Maildir/
 
 #
-# Example 5: same as (3), but move messages to the mail folder "sent-mail"
+# Example 6: same as (4), but move messages to the mail folder "sent-mail"
 # after retrieving them.  Note that you do this by setting delete and
 # move_on_delete options.
 #
@@ -96,7 +110,7 @@ type = Maildir
 path = ~jeffp/Maildir/
 
 #
-# Example 6:  same as (1), but deliver the messages to an mboxrd-format mbox
+# Example 7:  same as (1), but deliver the messages to an mboxrd-format mbox
 # file as user "jeffp".
 #
 
@@ -112,7 +126,7 @@ path = ~jeffp/Mail/inbox
 user = jeffp
 
 #
-# Example 7:  same as (1), but deliver the messages through an external MDA
+# Example 8:  same as (1), but deliver the messages through an external MDA
 # which takes several arguments.
 #
 
@@ -129,7 +143,7 @@ arguments = ("--message-from-stdin", "--scan-message", "--to-maildir",
   "~jeffp/Maildir/")
 
 #
-# Example 8:  retrieve mail from a corporate POP3-SSL domain mailbox,
+# Example 9:  retrieve mail from a corporate POP3-SSL domain mailbox,
 # sort messages for several local users and deliver to maildirs in their
 # home directories (except Sam, who likes mbox files, and Christina, who
 # uses procmail for further sorting), and deliver all other mail to
@@ -187,7 +201,7 @@ arguments = ("-f", "%(sender)", "-m", "/home/christina/.procmailrc")
 user = christina
 
 #
-# Example 9: same as (3), but use SpamAssassin to filter out spam,
+# Example 10: same as (4), but use SpamAssassin to filter out spam,
 # and ClamAV to filter out MS worms.
 #
 
@@ -213,7 +227,7 @@ type = Maildir
 path = ~jeffp/Maildir/
 
 #
-# Example 10: same as (3), but deliver all mail to two different local
+# Example 11: same as (4), but deliver all mail to two different local
 # mailboxes.
 #
 
@@ -231,7 +245,7 @@ destinations = (
     )
 
 #
-# Example 11:  retrieve mail from a simple (non-multidrop) POP3 mailbox.
+# Example 12:  retrieve mail from a simple (non-multidrop) POP3 mailbox.
 # Then extract addresses from the message header (see documentation for which
 # fields are examined), and deliver mail containing the address
 # <list1@domain.example.net> to ~/Mail/lists/list1/, mail containing the

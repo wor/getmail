@@ -683,7 +683,29 @@ if keychain_password is None:
 
 #######################################
 def get_password(label, user, server, protocol, logger):
-    # try keychain/keyrings first, where available
+    # try passwordeval first
+    if label.conf['passwordeval']:
+        cmd = label.conf['passwordeval']
+        (status, output) = commands.getstatusoutput(cmd)
+        password = None
+        if status != os.EX_OK or not output:
+            emsg = 'passwordeval command "{}" failed: {} {}'.format(
+                    cmd, status, output)
+            # Add line separator if missing so that prompting for password is
+            # clearer
+            if emsg[-1] != os.linesep:
+                emsg += os.linesep
+            logger.error(emsg)
+        else:
+            # select last line as password from the output and remove any line
+            # separators from the end.
+            password = output.rstrip(os.linesep).rpartition(os.linesep)[2]
+        # if could not be evaluated, prompt in the usual way
+        if not password:
+            password = getpass.getpass('Enter password for %s:  ' % label)
+        return password
+
+    # try keychain/keyrings second, where available
     password = keychain_password(user, server, protocol, logger)
     if password:
         logger.debug('using password from keychain/keyring')

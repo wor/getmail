@@ -548,8 +548,9 @@ type = <span class="meta">typename</span>
         password
         (<a href="#parameter-string">string</a>)
         &mdash; password to use when logging in to the mail server.  If not
-        using Kerberos authentication -- see below -- getmail gets the password
-        credential for the POP/IMAP server in one of the following ways:
+        using Kerberos authentication or passwordeval option -- see below --
+        getmail gets the password credential for the POP/IMAP server in one of
+        the following ways:
         <ol>
             <li>from the <span class="file">password</span> configuration item in the getmailrc file</li>
             <li>on Mac OS X only, from the OS X keychain</li>
@@ -568,6 +569,12 @@ type = <span class="meta">typename</span>
         some additional steps may be necessary to make the password available to getmail
         via the keychain.  See <a href="http://article.gmane.org/gmane.mail.getmail.user/5120">this
         posting to the getmail users' mailing list by Alan Schmitt</a> for details.
+    </li>
+    <li>
+        passwordeval
+        (<a href="#parameter-string">string</a>)
+        &mdash; command which output is used as the password. This can be used
+        instead of the password option.
     </li>
 </ul>
 <p>
@@ -1244,6 +1251,17 @@ type = SimplePOP3Retriever
 server = popmail.isp.example.net
 username = account_name
 password = my_mail_password
+</pre>
+
+<p>
+    A typical POP3 mail account with password in gpg encrypted file.
+</p>
+<pre class="example">
+[retriever]
+type = SimplePOP3Retriever
+server = popmail.isp.example.net
+username = account_name
+passwordeval = gpg -d ~/.popmail.isp.example.net.gpg
 </pre>
 
 <p>
