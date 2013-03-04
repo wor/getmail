@@ -9,6 +9,7 @@ repo="/home/wor/repo/getmail"
 branch="upstream"
 version="${1}"
 
+author="charlesc <charlesc-getmail-support@pyropus.ca>"
 url="http://pyropus.ca/software/getmail/old-versions/"
 package="getmail-${version}.tar.gz"
 
@@ -22,6 +23,6 @@ rm "${package}"
 git add .
 
 awk "BEGIN { out_fn=\"none\" }/^Version / { out_fn=\"/dev/null\"; } /^Version ${version}/ { out_fn=\"/dev/stdout\"; } { print > out_fn; }" docs/CHANGELOG \
-    | git commit -F -
+    | git commit -F - --author="${author}"
 
 git push origin "${branch}":"${branch}"
