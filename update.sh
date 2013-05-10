@@ -5,7 +5,7 @@ set -o errexit
 
 [[ "${1}" ]] || { echo "Error: First parameter should be version number like 4.35.0"; exit 1; }
 
-repo="/home/wor/repo/getmail"
+repo="$(pwd)"
 branch="upstream"
 version="${1}"
 
