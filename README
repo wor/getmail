@@ -1,3 +1,28 @@
+getmail (http://pyropus.ca/software/getmail) with "passwordeval" receiver option
+so that the password can be received from an external program instead of being
+stored clear text in the config file.
+
+Here's an example from a getmail config file, using gnupg:
+
+[retriever]
+type = SimpleIMAPSSLRetriever
+server = imap.gmail.com
+port = 993
+username = example@gmail.com
+passwordeval = gpg --no-tty -d ~/.pw/example@gmail.gpg
+
+
+About branches in this repository:
+
+* "passwordeval" branch has the passwordeval option implemented on top of the
+  upstream changes.
+* "upstream" branch tracks upstream tarball releases.
+* "master" branch has additional changes including script to ease "upstream"
+  branch updating and this readme change.
+
+Orginal readme
+--------------
+
 getmail version 4 -- a flexible, extensible mail retrieval system with
 support for POP3, IMAP4, SSL variants of both, maildirs, mboxrd files,
 external MDAs, arbitrary message filtering, single-user and domain-mailboxes,
