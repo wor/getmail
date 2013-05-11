@@ -50,8 +50,6 @@ else
     for v in "${new_versions[@]}"; do
         echo $v
     done
-
-    exit 0
 fi
 
 set -o errexit
