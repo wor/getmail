@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # Quick script to automate repo updating from upstream tarball releases.
 
 get_version_changelog() {
