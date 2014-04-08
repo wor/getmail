@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Quick script to automate repo updating from upstream tarball releases.
+# Exits with '2' if now new versions found.
 
 get_version_changelog() {
     local changelog="${1}"
@@ -43,7 +44,7 @@ else
 
     if [[ "${#new_versions[@]}" == 0 ]]; then
         echo "No new versions found."
-        exit 0
+        exit 2
     fi
 
     echo "Found new versions:"
