@@ -233,6 +233,15 @@ EAI_FAIL = getattr(socket, 'EAI_FAIL', NO_OBJ)
 # Constant for POPSSL
 POP3_SSL_PORT = 995
 
+
+# Python added poplib._MAXLINE somewhere along the way.  As far as I can
+# see, it serves no purpose except to introduce bugs into any software
+# using poplib.  Any computer running Python will have at least some megabytes
+# of userspace memory; arbitrarily causing message retrieval to break if any
+# "line" exceeds 2048 bytes is absolutely stupid.
+poplib._MAXLINE = 1 << 20   # 1MB; decrease this if you're running on a VIC-20
+
+
 #
 # Mix-in classes
 #
@@ -733,7 +742,7 @@ class RetrieverSkeleton(ConfigurableBase):
     def __init__(self, **args):
         self.headercache = {}
         self.deleted = {}
-        self.timestamp = int(time.time())
+        self.set_new_timestamp()
         self.__oldmail_written = False
         self.__initialized = False
         self.gotmsglist = False
@@ -741,6 +750,9 @@ class RetrieverSkeleton(ConfigurableBase):
         self.conn = None
         self.supports_idle = False
         ConfigurableBase.__init__(self, **args)
+
+    def set_new_timestamp(self):
+        self.timestamp = int(time.time())
 
     def _clear_state(self):
         self.msgnum_by_msgid = {}
@@ -1325,9 +1337,10 @@ class IMAPRetrieverBase(RetrieverSkeleton):
                     raise ValueError
                 name = parts.pop(0).lower()
                 r[name] = parts.pop(0)
-        except (ValueError, IndexError), o:
+        except (ValueError, IndexError, AttributeError), o:
             raise getmailOperationError(
-                'IMAP error (failed to parse UID response line "%s")' % line
+                'IMAP error (failed to parse attr response line "%s": %s)' 
+                % (line, o)
             )
         self.log.trace('got %s' % r + os.linesep)
         return r
@@ -1433,6 +1446,10 @@ class IMAPRetrieverBase(RetrieverSkeleton):
                     'FETCH', '1:%d' % msgcount, '(UID RFC822.SIZE)'
                 )
                 for line in response:
+                    if not line:
+                        # One user had a server that returned a null response
+                        # somehow -- try to just skip.
+                        continue
                     r = self._parse_imapattrresponse(line)
                     # Don't allow / in UIDs we store, as we look for that to 
                     # detect old-style oldmail files.  Can occur with IMAP, at 

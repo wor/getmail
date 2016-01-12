@@ -954,7 +954,7 @@ ScanMail
 
    See the following mailing list message from Frankye Fattarelli for
    additional notes on using ClamAV with getmail:
-   http://marc.theaimsgroup.com/?l=getmail&m=109128345509273&w=2
+   https://marc.info/?l=getmail&m=109128345509273&w=2
 
 Getting prettier output from ClamAV
 
